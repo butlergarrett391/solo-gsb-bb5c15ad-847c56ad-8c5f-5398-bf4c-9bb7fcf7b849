@@ -8,10 +8,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.weave import (  # noqa: E402
     DesignError,
+    analyze_loom_fit,
     analyze_repeat_period,
     audit_floats,
     best_alignment,
     build_interlacing,
+    reduce_draft,
     repeat_period_of_matrix,
     scan_balance_hotspots,
     search_repair_plans,
@@ -44,6 +46,229 @@ def assert_tiles(matrix, period, msg):
         for w in range(ends)
     )
     check(tiled, f"{msg}: unit tiles the full matrix seamlessly (mod wrap)")
+
+
+def assert_reduced(threading, tie_up, treadling, msg):
+    """约简草图的通用不变量：尺寸、等价类划分、编号顺序、绑综、逐点重建。"""
+    matrix = build_interlacing(threading, tie_up, treadling)
+    picks, ends = len(matrix), len(matrix[0])
+    reduced = reduce_draft(threading, tie_up, treadling)
+    check(reduced.shafts >= 1 and reduced.treadles >= 1,
+          f"{msg}: reduced counts positive")
+    check(reduced.shafts <= len(tie_up[0])
+          and reduced.treadles <= len(tie_up),
+          f"{msg}: reduced counts never exceed the original declaration")
+    check(len(reduced.threading) == ends
+          and len(reduced.treadling) == picks,
+          f"{msg}: reduced threading/treadling keep yarn counts")
+    check(len(reduced.tie_up) == reduced.treadles
+          and all(len(r) == reduced.shafts for r in reduced.tie_up),
+          f"{msg}: reduced tie_up is min_treadles x min_shafts")
+    check(all(0 <= s < reduced.shafts for s in reduced.threading)
+          and all(0 <= t < reduced.treadles for t in reduced.treadling),
+          f"{msg}: reduced indices in range")
+
+    # shaft_classes / treadle_classes 构成原纱线的一个划分
+    flat_cols = [w for cls in reduced.shaft_classes for w in cls]
+    flat_rows = [h for cls in reduced.treadle_classes for h in cls]
+    check(sorted(flat_cols) == list(range(ends)) and len(flat_cols) == ends,
+          f"{msg}: shaft classes partition warp ends")
+    check(sorted(flat_rows) == list(range(picks)) and len(flat_rows) == picks,
+          f"{msg}: treadle classes partition weft picks")
+
+    # 等价类按首次出现顺序从 0 编号
+    first_cols = [cls[0] for cls in reduced.shaft_classes]
+    first_rows = [cls[0] for cls in reduced.treadle_classes]
+    check(first_cols == sorted(first_cols),
+          f"{msg}: shaft classes numbered by first appearance")
+    check(first_rows == sorted(first_rows),
+          f"{msg}: treadle classes numbered by first appearance")
+    class_of_col = {w: i for i, cls in enumerate(reduced.shaft_classes)
+                    for w in cls}
+    check(reduced.threading == [class_of_col[w] for w in range(ends)],
+          f"{msg}: reduced threading matches shaft classes")
+    class_of_row = {h: i for i, cls in enumerate(reduced.treadle_classes)
+                    for h in cls}
+    check(reduced.treadling == [class_of_row[h] for h in range(picks)],
+          f"{msg}: reduced treadling matches treadle classes")
+
+    # 同类列（行）向量确实相同；不同类列（行）向量确实不同
+    for cls in reduced.shaft_classes:
+        for w in cls:
+            check([matrix[h][w] for h in range(picks)]
+                  == [matrix[h][cls[0]] for h in range(picks)],
+                  f"{msg}: same shaft class means identical column vectors")
+    for i, cls_a in enumerate(reduced.shaft_classes):
+        for j in range(i):
+            wa, wb = reduced.shaft_classes[i][0], reduced.shaft_classes[j][0]
+            check(any(matrix[h][wa] != matrix[h][wb] for h in range(picks)),
+                  f"{msg}: distinct shaft classes have distinct column vectors")
+    for cls in reduced.treadle_classes:
+        for h in cls:
+            check(matrix[h] == matrix[cls[0]],
+                  f"{msg}: same treadle class means identical row vectors")
+    for i, cls_a in enumerate(reduced.treadle_classes):
+        for j in range(i):
+            ha, hb = reduced.treadle_classes[i][0], reduced.treadle_classes[j][0]
+            check(any(matrix[ha][w] != matrix[hb][w] for w in range(ends)),
+                  f"{msg}: distinct treadle classes have distinct row vectors")
+
+    # 约简绑综与代表元交叉点一致；逐点重建与原矩阵完全相同
+    for ti, cls_h in enumerate(reduced.treadle_classes):
+        for si, cls_w in enumerate(reduced.shaft_classes):
+            check(reduced.tie_up[ti][si] == matrix[cls_h[0]][cls_w[0]],
+                  f"{msg}: reduced tie_up cell matches representative crossing")
+    rebuilt = build_interlacing(
+        reduced.threading, reduced.tie_up, reduced.treadling
+    )
+    check(rebuilt == matrix and reduced.interlacing == matrix,
+          f"{msg}: pointwise reconstruction equals the original matrix")
+    return reduced
+
+
+def test_reduce_draft_redundant_shafts_and_treadles():
+    # 3 综 3 踏的声明，但交织矩阵只有 2 种列向量、2 种行向量
+    threading = [0, 1, 2]
+    tie_up = [[1, 0, 1], [0, 1, 0], [1, 0, 1]]
+    treadling = [0, 1, 2]
+    # 矩阵：
+    # 1 0 1   （列 0 与列 2 相同）
+    # 0 1 0
+    # 1 0 1   （行 0 与行 2 相同）
+    matrix = build_interlacing(threading, tie_up, treadling)
+    check(matrix == [[1, 0, 1], [0, 1, 0], [1, 0, 1]],
+          "redundant fixture matrix as expected")
+    reduced = assert_reduced(threading, tie_up, treadling,
+                             "redundant 3x3 draft")
+    check(reduced.shafts == 2 and reduced.treadles == 2,
+          "two distinct column vectors and two distinct row vectors")
+    # 首次出现顺序：列 0=(1,0,1)→0，列 1=(0,1,0)→1；行同理
+    check(reduced.threading == [0, 1, 0],
+          "reduced threading groups identical columns, first-appearance order")
+    check(reduced.treadling == [0, 1, 0],
+          "reduced treadling groups identical rows, first-appearance order")
+    check(reduced.tie_up == [[1, 0], [0, 1]],
+          "reduced tie_up is the canonical 2x2 plain-weave draft")
+    check(reduced.shaft_classes == [[0, 2], [1]],
+          "shaft classes list original warp columns")
+    check(reduced.treadle_classes == [[0, 2], [1]],
+          "treadle classes list original weft rows")
+
+
+def test_reduce_draft_different_original_shafts_same_column():
+    # 经纱穿在不同原综框上，但列向量恰好相同 → 必须归并
+    threading = [0, 2]
+    tie_up = [[1, 0, 1]]   # 踏板 0 同时提升原综框 0、2
+    treadling = [0, 0]
+    matrix = build_interlacing(threading, tie_up, treadling)
+    check(matrix == [[1, 1], [1, 1]], "all-ones matrix fixture")
+    reduced = assert_reduced(threading, tie_up, treadling,
+                             "different shafts identical column vectors")
+    check(reduced.shafts == 1 and reduced.treadles == 1,
+          "identical columns merge even if they used different original shafts")
+    check(reduced.threading == [0, 0] and reduced.treadling == [0, 0],
+          "everything maps to reduced shaft/treadle 0")
+    check(reduced.tie_up == [[1]], "single reduced shaft and treadle")
+
+
+def test_reduce_draft_unused_shafts_dropped():
+    # 声明 4 综 4 踏，但踏板 3 从未被踩、综框 3 从未被穿入
+    threading = [0, 1, 0, 1]
+    tie_up = [[1, 0, 0, 0], [0, 1, 0, 0], [1, 0, 0, 0], [0, 0, 0, 1]]
+    treadling = [0, 1, 0, 1]
+    reduced = assert_reduced(threading, tie_up, treadling,
+                             "unused shafts and treadles")
+    check(reduced.shafts == 2 and reduced.treadles == 2,
+          "unused declared shafts/treadles are dropped")
+    check(reduced.tie_up == [[1, 0], [0, 1]], "reduced plain-weave tie_up")
+
+
+def test_reduce_draft_all_distinct_kept():
+    # 3x3 单位阵：每个列向量、行向量都不同，无法约简
+    threading = [0, 1, 2]
+    tie_up = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+    treadling = [0, 1, 2]
+    reduced = assert_reduced(threading, tie_up, treadling,
+                             "identity matrix needs no reduction")
+    check(reduced.shafts == 3 and reduced.treadles == 3,
+          "identity matrix needs all 3 shafts and 3 treadles")
+    check(reduced.threading == [0, 1, 2] and reduced.treadling == [0, 1, 2]
+          and reduced.tie_up == tie_up,
+          "identity draft is unchanged by reduction")
+
+
+def test_loom_fit_fit_flags_and_reductions():
+    threading = [0, 1, 2]
+    tie_up = [[1, 0, 1], [0, 1, 0], [1, 0, 1]]
+    treadling = [0, 1, 2]
+
+    fit = analyze_loom_fit(threading, tie_up, treadling, 2, 2)
+    check(fit.fits is True and fit.shafts_fit and fit.treadles_fit,
+          "2x2 device fits the reduced 2x2 requirement")
+    check(fit.original_shafts == 3 and fit.original_treadles == 3,
+          "original declared counts retained")
+    check(fit.min_shafts == 2 and fit.min_treadles == 2,
+          "minimum counts are the distinct vector counts")
+    check(fit.shafts_removed == 1 and fit.treadles_removed == 1,
+          "one shaft and one treadle removed")
+    check(abs(fit.shaft_reduction_ratio - 1 / 3) < 1e-12
+          and abs(fit.treadle_reduction_ratio - 1 / 3) < 1e-12,
+          "reduction ratios relative to the original design")
+
+    fit = analyze_loom_fit(threading, tie_up, treadling, 1, 2)
+    check(fit.fits is False and fit.shafts_fit is False
+          and fit.treadles_fit is True,
+          "fits false when only shafts exceed the limit")
+    fit = analyze_loom_fit(threading, tie_up, treadling, 2, 1)
+    check(fit.fits is False and fit.shafts_fit is True
+          and fit.treadles_fit is False,
+          "fits false when only treadles exceed the limit")
+    fit = analyze_loom_fit(threading, tie_up, treadling, 64, 64)
+    check(fit.fits is True, "limit 64 always fits small designs")
+
+
+def test_loom_fit_validation():
+    threading, tie_up, treadling = [0, 1], [[1, 0], [0, 1]], [0, 1]
+    for bad in (0, 65, -1, True, 1.5, "2"):
+        try:
+            analyze_loom_fit(threading, tie_up, treadling, bad, 2)
+            raised = False
+        except DesignError:
+            raised = True
+        check(raised, f"max_shafts={bad!r} rejected")
+        try:
+            analyze_loom_fit(threading, tie_up, treadling, 2, bad)
+            raised = False
+        except DesignError:
+            raised = True
+        check(raised, f"max_treadles={bad!r} rejected")
+
+
+def test_reduce_draft_random_properties():
+    rng = random.Random(20260922)
+    for _ in range(200):
+        shafts = rng.randint(1, 5)
+        treadles = rng.randint(1, 5)
+        tie_up = [[rng.randint(0, 1) for _ in range(shafts)]
+                  for _ in range(treadles)]
+        ends = rng.randint(1, 10)
+        picks = rng.randint(1, 10)
+        threading = [rng.randrange(shafts) for _ in range(ends)]
+        treadling = [rng.randrange(treadles) for _ in range(picks)]
+        matrix = build_interlacing(threading, tie_up, treadling)
+        reduced = reduce_draft(threading, tie_up, treadling)
+        # 最少综框数 = 不同列向量数（用集合独立核算）
+        distinct_cols = len({
+            tuple(matrix[h][w] for h in range(picks)) for w in range(ends)
+        })
+        distinct_rows = len({tuple(matrix[h]) for h in range(picks)})
+        check(reduced.shafts == distinct_cols,
+              "random: min_shafts equals distinct column vector count")
+        check(reduced.treadles == distinct_rows,
+              "random: min_treadles equals distinct row vector count")
+        check(build_interlacing(
+            reduced.threading, reduced.tie_up, reduced.treadling
+        ) == matrix, "random: reconstructed matrix matches pointwise")
 
 
 
@@ -760,6 +985,13 @@ def test_validation():
 if __name__ == "__main__":
     test_interlacing()
     test_warp_and_weft_floats()
+    test_reduce_draft_redundant_shafts_and_treadles()
+    test_reduce_draft_different_original_shafts_same_column()
+    test_reduce_draft_unused_shafts_dropped()
+    test_reduce_draft_all_distinct_kept()
+    test_loom_fit_fit_flags_and_reductions()
+    test_loom_fit_validation()
+    test_reduce_draft_random_properties()
     test_cyclic_merge()
     test_cyclic_audit_end_to_end()
     test_cyclic_wrap_violation()

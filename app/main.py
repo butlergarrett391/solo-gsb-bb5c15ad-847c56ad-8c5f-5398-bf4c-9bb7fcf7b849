@@ -17,6 +17,8 @@ from .models import (
     DesignOut,
     DesignSummary,
     ErrorOut,
+    LoomFitIn,
+    LoomFitOut,
     RepeatPeriodOut,
     RepairPlanOut,
     ThresholdProfileOut,
@@ -286,6 +288,33 @@ def compare_designs(design_id: int, request: DesignCompareIn) -> dict:
         "weft_picks": stored["weft_picks"],
         **result.to_dict(),
     }
+
+
+@app.post(
+    "/designs/{design_id}/loom-fit",
+    response_model=LoomFitOut,
+    responses={404: {"model": ErrorOut, "description": "设计不存在"}},
+    tags=["designs"],
+)
+def loom_fit(design_id: int, request: LoomFitIn) -> dict:
+    """织机适配性（草图约简）：读取已入库设计并重新生成交织矩阵，**基于交织
+    矩阵而非原综框/踏板编号**做约简——完整列向量相同的经纱归入同一个约简
+    综框，完整行向量相同的纬纱归入同一个约简踏板；等价类按首次出现顺序从
+    0 编号，据此重建 threading、treadling、tie_up，并逐点校验重建矩阵与原
+    矩阵一致。返回是否适配（仅当最少综框数与最少踏板数均不超过设备上限时
+    `fits=true`）、两项最少数量、约简草图及相对原设计的减少量。接口只读
+    计算，不修改数据库；设计不存在返回 404。"""
+    stored = db.get_design(design_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail=f"design {design_id} not found")
+    result = weave.analyze_loom_fit(
+        stored["threading"],
+        stored["tie_up"],
+        stored["treadling"],
+        request.max_shafts,
+        request.max_treadles,
+    )
+    return {"design_id": design_id, **result.to_dict()}
 
 
 @app.post(

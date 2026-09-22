@@ -160,6 +160,100 @@ class RepeatPeriodOut(BaseModel):
     )
 
 
+class ReducedDraftOut(BaseModel):
+    """基于交织矩阵约简出的最简草图（threading/treadling/tie_up）。"""
+
+    shafts: int = Field(
+        ..., description="约简后综框数：交织矩阵中不同完整列向量的数量"
+    )
+    treadles: int = Field(
+        ..., description="约简后踏板数：交织矩阵中不同完整行向量的数量"
+    )
+    threading: list[int] = Field(
+        ...,
+        description="约简穿综映射：threading[w] 为第 w 根经纱所属约简综框"
+        "（完整列向量等价类，按首次出现顺序从 0 编号）",
+    )
+    treadling: list[int] = Field(
+        ...,
+        description="约简踏综序列：treadling[h] 为第 h 纬所属约简踏板"
+        "（完整行向量等价类，按首次出现顺序从 0 编号）",
+    )
+    tie_up: list[list[int]] = Field(
+        ...,
+        description="约简绑综矩阵：treadles 行 × shafts 列，0/1；由约简"
+        "threading/treadling 重建，逐点校验与原交织矩阵一致",
+    )
+    shaft_classes: list[list[int]] = Field(
+        ...,
+        description="每个约简综框包含的原经纱列号，按综框编号排列；"
+        "类内编号按经纱首次出现顺序",
+    )
+    treadle_classes: list[list[int]] = Field(
+        ...,
+        description="每个约简踏板包含的原纬纱行号，按踏板编号排列；"
+        "类内编号按纬纱首次出现顺序",
+    )
+    interlacing: list[list[int]] = Field(
+        ...,
+        description="由约简草图重建的交织矩阵（1=经纱在上，0=纬纱在上），"
+        "已逐点校验与原设计交织矩阵完全一致",
+    )
+
+
+class LoomFitIn(BaseModel):
+    """织机适配性（草图约简）请求：设备综框/踏板上限。"""
+
+    max_shafts: int = Field(
+        ..., ge=1, le=64, description="织机综框数上限，1～64"
+    )
+    max_treadles: int = Field(
+        ..., ge=1, le=64, description="织机踏板数上限，1～64"
+    )
+
+
+class LoomFitOut(BaseModel):
+    """交织矩阵相对设备综框/踏板上限的适配性与约简草图。"""
+
+    design_id: int = Field(..., description="被分析的设计 ID")
+    max_shafts: int = Field(..., description="请求给定的综框数上限")
+    max_treadles: int = Field(..., description="请求给定的踏板数上限")
+    original_shafts: int = Field(..., description="原设计声明的综框数")
+    original_treadles: int = Field(..., description="原设计声明的踏板数")
+    min_shafts: int = Field(
+        ..., description="织出该交织矩阵所需的最少综框数（不同完整列向量数）"
+    )
+    min_treadles: int = Field(
+        ..., description="织出该交织矩阵所需的最少踏板数（不同完整行向量数）"
+    )
+    fits: bool = Field(
+        ...,
+        description="是否适配：仅当 min_shafts ≤ max_shafts 且 "
+        "min_treadles ≤ max_treadles 时为 true",
+    )
+    shafts_fit: bool = Field(
+        ..., description="最少综框数是否不超过 max_shafts"
+    )
+    treadles_fit: bool = Field(
+        ..., description="最少踏板数是否不超过 max_treadles"
+    )
+    shafts_removed: int = Field(
+        ..., description="相对原设计约简掉的综框数：original_shafts - min_shafts"
+    )
+    treadles_removed: int = Field(
+        ..., description="相对原设计约简掉的踏板数：original_treadles - min_treadles"
+    )
+    shaft_reduction_ratio: float = Field(
+        ..., description="综框减少比例：shafts_removed / original_shafts，0～1"
+    )
+    treadle_reduction_ratio: float = Field(
+        ..., description="踏板减少比例：treadles_removed / original_treadles，0～1"
+    )
+    reduced_draft: ReducedDraftOut = Field(
+        ..., description="按交织矩阵等价类重建的约简草图"
+    )
+
+
 class ErrorOut(BaseModel):
     detail: str
 

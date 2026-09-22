@@ -697,6 +697,188 @@ def best_alignment(
     return best
 
 
+@dataclass
+class ReducedDraft:
+    shafts: int                        # 约简后综框数（不同完整列向量数）
+    treadles: int                      # 约简后踏板数（不同完整行向量数）
+    threading: list[int]               # 约简穿综：每根经纱所属约简综框（按列等价类）
+    treadling: list[int]               # 约简踏综：每根纬纱所属约简踏板（按行等价类）
+    tie_up: list[list[int]]            # 约简绑综矩阵，treadles 行 × shafts 列
+    shaft_classes: list[list[int]]     # 每个约简综框包含的原经纱列号（首次出现顺序）
+    treadle_classes: list[list[int]]   # 每个约简踏板包含的原纬纱行号（首次出现顺序）
+    interlacing: list[list[int]]       # 由约简草图重建并逐点校验通过的交织矩阵
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class LoomFit:
+    max_shafts: int                    # 设备综框上限
+    max_treadles: int                  # 设备踏板上限
+    original_shafts: int               # 原设计综框数
+    original_treadles: int             # 原设计踏板数
+    min_shafts: int                    # 交织矩阵所需最少综框数
+    min_treadles: int                  # 交织矩阵所需最少踏板数
+    fits: bool                         # 两项最少数量均不超过设备上限
+    shafts_fit: bool                   # 最少综框数不超过 max_shafts
+    treadles_fit: bool                 # 最少踏板数不超过 max_treadles
+    shafts_removed: int                # 约简掉的综框数：original_shafts - min_shafts
+    treadles_removed: int              # 约简掉的踏板数：original_treadles - min_treadles
+    shaft_reduction_ratio: float       # 综框减少比例：shafts_removed / original_shafts
+    treadle_reduction_ratio: float     # 踏板减少比例：treadles_removed / original_treadles
+    reduced_draft: ReducedDraft        # 约简草图
+
+    def to_dict(self) -> dict:
+        return {
+            "max_shafts": self.max_shafts,
+            "max_treadles": self.max_treadles,
+            "original_shafts": self.original_shafts,
+            "original_treadles": self.original_treadles,
+            "min_shafts": self.min_shafts,
+            "min_treadles": self.min_treadles,
+            "fits": self.fits,
+            "shafts_fit": self.shafts_fit,
+            "treadles_fit": self.treadles_fit,
+            "shafts_removed": self.shafts_removed,
+            "treadles_removed": self.treadles_removed,
+            "shaft_reduction_ratio": self.shaft_reduction_ratio,
+            "treadle_reduction_ratio": self.treadle_reduction_ratio,
+            "reduced_draft": self.reduced_draft.to_dict(),
+        }
+
+
+def reduce_draft(
+    threading: list[int],
+    tie_up: list[list[int]],
+    treadling: list[int],
+) -> ReducedDraft:
+    """基于交织矩阵把草图约简到综框/踏板的最少用量。
+
+    约简只看交织矩阵本身，不沿用原综框/踏板编号：
+    - 经纱按其**完整列向量**（该经纱在所有纬纱上的交织取值）归并：列向量
+      完全相同的经纱穿入同一个约简综框；不同列向量必须使用不同综框；
+    - 纬纱按其**完整行向量**归并：行向量完全相同的纬纱踩同一个约简踏板；
+    - 等价类按各自方向上的**首次出现顺序**从 0 编号，据此重建 threading、
+      treadling 与 tie_up（约简 tie_up 取每个 (踏板类, 综框类) 交叉处的
+      矩阵值——同类行/列保证该值与代表元的选取无关）；
+    - 重建后再用 build_interlacing 逐点校验与原矩阵完全一致，不一致则抛
+      DesignError（理论上不会发生，属内部不变量检查）。
+
+    原设计中声明却从未被穿入的综框（从未被踩下的踏板同理）不出现在任何
+    列（行）向量中，自然被约简掉。不修改传入的设计数据。
+    """
+    validate_design(threading, tie_up, treadling, 1)
+    matrix = build_interlacing(threading, tie_up, treadling)
+    picks = len(matrix)          # 纬纱数（行数）
+    ends = len(matrix[0])        # 经纱数（列数）
+
+    # 经纱 → 约简综框：相同完整列向量归一类，首次出现顺序编号
+    col_index: dict[tuple[int, ...], int] = {}
+    reduced_threading: list[int] = []
+    shaft_classes: list[list[int]] = []
+    for w in range(ends):
+        column = tuple(matrix[h][w] for h in range(picks))
+        cls = col_index.get(column)
+        if cls is None:
+            cls = len(shaft_classes)
+            col_index[column] = cls
+            shaft_classes.append([])
+        reduced_threading.append(cls)
+        shaft_classes[cls].append(w)
+
+    # 纬纱 → 约简踏板：相同完整行向量归一类，首次出现顺序编号
+    row_index: dict[tuple[int, ...], int] = {}
+    reduced_treadling: list[int] = []
+    treadle_classes: list[list[int]] = []
+    for h in range(picks):
+        row = tuple(matrix[h])
+        cls = row_index.get(row)
+        if cls is None:
+            cls = len(treadle_classes)
+            row_index[row] = cls
+            treadle_classes.append([])
+        reduced_treadling.append(cls)
+        treadle_classes[cls].append(h)
+
+    min_shafts = len(shaft_classes)
+    min_treadles = len(treadle_classes)
+
+    # 由约简穿综/踏综反推约简绑综：同类行、同类列的交叉点取值必然一致，
+    # 任取矩阵中的代表单元即可
+    reduced_tie_up = [[0] * min_shafts for _ in range(min_treadles)]
+    for h in range(picks):
+        treadle_cls = reduced_treadling[h]
+        for w in range(ends):
+            reduced_tie_up[treadle_cls][reduced_threading[w]] = matrix[h][w]
+
+    reconstructed = build_interlacing(
+        reduced_threading, reduced_tie_up, reduced_treadling
+    )
+    if reconstructed != matrix:
+        raise DesignError(
+            "loom-fit internal check failed: reconstructed interlacing matrix "
+            "differs from the original"
+        )
+
+    return ReducedDraft(
+        shafts=min_shafts,
+        treadles=min_treadles,
+        threading=reduced_threading,
+        treadling=reduced_treadling,
+        tie_up=reduced_tie_up,
+        shaft_classes=shaft_classes,
+        treadle_classes=treadle_classes,
+        interlacing=reconstructed,
+    )
+
+
+def analyze_loom_fit(
+    threading: list[int],
+    tie_up: list[list[int]],
+    treadling: list[int],
+    max_shafts: int,
+    max_treadles: int,
+) -> LoomFit:
+    """判断交织矩阵能否在给定综框/踏板上限的织机上织出。
+
+    最少综框数 = 不同完整列向量数，最少踏板数 = 不同完整行向量数（见
+    reduce_draft）；仅当两者分别不超过 max_shafts、max_treadles 时
+    fits 为 true。上限取值范围为 1～64。计算只读，不修改传入数据。
+    """
+    _check_int(max_shafts, "max_shafts")
+    _check_int(max_treadles, "max_treadles")
+    if not 1 <= max_shafts <= 64:
+        raise DesignError("max_shafts must be within [1, 64]")
+    if not 1 <= max_treadles <= 64:
+        raise DesignError("max_treadles must be within [1, 64]")
+
+    reduced = reduce_draft(threading, tie_up, treadling)
+    original_shafts = len(tie_up[0])
+    original_treadles = len(tie_up)
+    shafts_removed = original_shafts - reduced.shafts
+    treadles_removed = original_treadles - reduced.treadles
+
+    shafts_fit = reduced.shafts <= max_shafts
+    treadles_fit = reduced.treadles <= max_treadles
+    return LoomFit(
+        max_shafts=max_shafts,
+        max_treadles=max_treadles,
+        original_shafts=original_shafts,
+        original_treadles=original_treadles,
+        min_shafts=reduced.shafts,
+        min_treadles=reduced.treadles,
+        fits=shafts_fit and treadles_fit,
+        shafts_fit=shafts_fit,
+        treadles_fit=treadles_fit,
+        shafts_removed=shafts_removed,
+        treadles_removed=treadles_removed,
+        shaft_reduction_ratio=shafts_removed / original_shafts,
+        treadle_reduction_ratio=treadles_removed / original_treadles,
+        reduced_draft=reduced,
+    )
+
+
 def _prefix_sums(matrix: list[list[int]]) -> list[list[int]]:
     """二维前缀和：ps[h][w] 为矩阵前 h 行、前 w 列的元素之和。"""
     picks = len(matrix)

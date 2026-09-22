@@ -14,7 +14,10 @@
 交织矩阵在经、纬方向的所有循环错位，给出不一致单元最少的最佳对齐、错位
 坐标与按行/列汇总。还可对已存设计做**局部交织均衡审计**：按给定窗口逐窗
 统计交织矩阵中 `1`（经纱在上）的占比，找出占比超出允许区间的超界窗口，
-并汇总偏离最近阈值幅度最大的最严重窗口。
+并汇总偏离最近阈值幅度最大的最严重窗口。还可对已存设计做**织机适配性
+分析（草图约简）**：基于交织矩阵把完整列向量相同的经纱并入同一约简综框、
+完整行向量相同的纬纱并入同一约简踏板，给出最少综框/踏板数、重建的约简
+草图与相对原设计的减少量，并判断能否在给定综框/踏板上限的织机上织出。
 
 ## 快速启动
 
@@ -99,6 +102,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `POST` | `/designs/{id}/repair-plans` | 多步绑综修复方案：1～3 次翻转内搜索最终违规严格减少的方案，支持 `max_changes`、`limit` |
 | `POST` | `/designs/{id}/compare` | 设计对齐比对：枚举第二份矩阵的经纬循环错位，返回最佳偏移、错位坐标与汇总 |
 | `POST` | `/designs/{id}/balance-hotspots` | 局部交织均衡审计：逐窗统计 `1` 的占比，返回超界窗口、偏离幅度与最严重窗口 |
+| `POST` | `/designs/{id}/loom-fit` | 织机适配性（草图约简）：按交织矩阵列/行等价类重建最简草图，返回最少综框/踏板数、约简草图与减少量，判断是否不超过设备上限 |
 | `GET` | `/health` | 健康检查 |
 
 ### 示例：提交设计
@@ -507,6 +511,104 @@ curl -s -X POST http://localhost:8000/designs/1/balance-hotspots \
 {"detail": "window 5x2 exceeds interlacing size 4x4 (window_rows x window_cols vs weft_picks x warp_ends) for cyclic design"}
 ```
 
+### 织机适配性（草图约简）
+
+`POST http://localhost:8000/designs/{id}/loom-fit`：读取已入库设计并重新
+生成**交织矩阵**，**基于交织矩阵而非原综框/踏板编号**把草图约简到最少用量：
+
+- **完整列向量相同**的经纱（在所有纬纱上的交织取值逐点一致）归入同一个
+  **约简综框**；不同列向量必须使用不同综框，因此最少综框数 = 不同完整列
+  向量数。即使两根经纱原本穿在不同综框上，只要列向量相同也会归并；原设计
+  声明却从未被穿入的综框自然消失；
+- **完整行向量相同**的纬纱归入同一个**约简踏板**；最少踏板数 = 不同完整
+  行向量数；
+- 两个方向的等价类都按**首次出现顺序**从 `0` 编号，据此重建 `threading`、
+  `treadling`，并反推出约简 `tie_up`（取每个踏板类 × 综框类交叉处的矩阵值，
+  同类行列保证取值与代表元无关）；
+- 重建后再由约简 threading/tie_up/treadling **逐点校验**与原交织矩阵完全
+  一致；
+- 仅当 `min_shafts ≤ max_shafts` **且** `min_treadles ≤ max_treadles` 时
+  `fits` 为 `true`（上限为闭区间，恰等也算适配）。
+
+接口只读计算，**不改库**；设计不存在返回 404。
+
+请求体：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `max_shafts` | `int`，1～64 | 织机综框数上限 |
+| `max_treadles` | `int`，1～64 | 织机踏板数上限 |
+
+返回字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `design_id` | 被分析的设计 ID |
+| `max_shafts` / `max_treadles` | 请求给定的设备上限 |
+| `original_shafts` / `original_treadles` | 原设计声明的综框数 / 踏板数 |
+| `min_shafts` / `min_treadles` | 织出该交织矩阵所需的最少综框数 / 踏板数 |
+| `fits` | 是否适配：两项最少数量均不超过对应上限时为 `true` |
+| `shafts_fit` / `treadles_fit` | 综框、踏板各自是否不超限（可据此判断卡在哪一项） |
+| `shafts_removed` / `treadles_removed` | 相对原设计约简掉的综框 / 踏板数量 |
+| `shaft_reduction_ratio` / `treadle_reduction_ratio` | 减少比例：减少量 / 原数量，0～1 |
+| `reduced_draft` | 约简草图，字段见下表 |
+
+`reduced_draft` 包含：
+
+| 字段 | 说明 |
+| --- | --- |
+| `shafts` / `treadles` | 约简后的综框数 / 踏板数（即两项最少数量） |
+| `threading` | 约简穿综：每根经纱所属约简综框（列等价类，首次出现顺序编号） |
+| `treadling` | 约简踏综：每根纬纱所属约简踏板（行等价类，首次出现顺序编号） |
+| `tie_up` | 约简绑综矩阵（`treadles` 行 × `shafts` 列，0/1） |
+| `shaft_classes` | 每个约简综框包含的原经纱列号（按综框编号排列，类内为首次出现顺序） |
+| `treadle_classes` | 每个约简踏板包含的原纬纱行号 |
+| `interlacing` | 由约简草图重建的交织矩阵，已逐点校验与原矩阵完全一致 |
+
+```bash
+curl -s -X POST http://localhost:8000/designs/1/loom-fit \
+  -H 'Content-Type: application/json' \
+  -d '{"max_shafts": 2, "max_treadles": 2}'
+```
+
+响应（200，原设计声明 3 综 3 踏、但矩阵只有 2 种列向量与 2 种行向量时）：
+
+```json
+{
+  "design_id": 1,
+  "max_shafts": 2,
+  "max_treadles": 2,
+  "original_shafts": 3,
+  "original_treadles": 3,
+  "min_shafts": 2,
+  "min_treadles": 2,
+  "fits": true,
+  "shafts_fit": true,
+  "treadles_fit": true,
+  "shafts_removed": 1,
+  "treadles_removed": 1,
+  "shaft_reduction_ratio": 0.3333333333333333,
+  "treadle_reduction_ratio": 0.3333333333333333,
+  "reduced_draft": {
+    "shafts": 2,
+    "treadles": 2,
+    "threading": [0, 1, 0],
+    "treadling": [0, 1, 0],
+    "tie_up": [[1, 0], [0, 1]],
+    "shaft_classes": [[0, 2], [1]],
+    "treadle_classes": [[0, 2], [1]],
+    "interlacing": [[1, 0, 1], [0, 1, 0], [1, 0, 1]]
+  }
+}
+```
+
+任一项超限时 `fits` 为 `false`（约简草图照常返回，便于查看实际需求量），
+上限越界返回 422：
+
+```json
+{"detail": [{"type": "greater_than_equal", "...": "..."}]}
+```
+
 ### 拒绝情形（HTTP 400，整份设计不入库）
 
 - 绑综矩阵非矩形（各行长度不一致）或含非 0/1 值；
@@ -528,6 +630,7 @@ python3 tests/test_api_repeat_period.py      # repeat-period 接口集成测试
 python3 tests/test_api_threshold_profile.py  # threshold-profile 接口集成测试
 python3 tests/test_api_compare.py            # compare 接口集成测试
 python3 tests/test_api_balance_hotspots.py   # balance-hotspots 接口集成测试
+python3 tests/test_api_loom_fit.py           # loom-fit 接口集成测试
 ```
 
 接口测试使用临时 SQLite 文件与 FastAPI TestClient，不需要启动服务，也不会
@@ -555,6 +658,7 @@ tests/
   test_api_threshold_profile.py   # threshold-profile 接口集成测试（TestClient，临时库）
   test_api_compare.py             # compare 接口集成测试（TestClient，临时库）
   test_api_balance_hotspots.py    # balance-hotspots 接口集成测试（TestClient，临时库）
+  test_api_loom_fit.py            # loom-fit 接口集成测试（TestClient，临时库）
 Dockerfile
 docker-compose.yml
 requirements.txt
