@@ -12,6 +12,7 @@ from app.weave import (  # noqa: E402
     audit_floats,
     best_alignment,
     build_interlacing,
+    reduce_to_loom,
     repeat_period_of_matrix,
     scan_balance_hotspots,
     search_repair_plans,
@@ -716,6 +717,147 @@ def test_balance_hotspots_validation():
     print("  ok: balance hotspots parameter validation")
 
 
+def test_loom_fit_no_reduction_when_columns_distinct():
+    # 2/2 斜纹 4 综 4 踏：交织矩阵的 4 个列向量、4 个行向量都互异，无法约简
+    threading = [0, 1, 2, 3, 0, 1, 2, 3]
+    tie_up = [[1, 1, 0, 0], [0, 1, 1, 0], [0, 0, 1, 1], [1, 0, 0, 1]]
+    treadling = [0, 1, 2, 3, 0, 1, 2, 3]
+    red = reduce_to_loom(threading, tie_up, treadling, 2)
+    check(red.original_shafts == 4 and red.original_treadles == 4,
+          "twill: reports original counts")
+    check(red.min_shafts == 4 and red.min_treadles == 4,
+          "twill: four distinct column/row vectors => 4 shafts, 4 treadles")
+    check(red.threading == threading and red.treadling == treadling
+          and red.tie_up == tie_up,
+          "twill: reduced draft equals the original draft")
+    check(red.interlacing == build_interlacing(threading, tie_up, treadling),
+          "twill: rebuilt matrix matches the original")
+
+
+def test_loom_fit_merges_redundant_shafts_and_treadles():
+    # 4 综 4 踏的穿法，但绑综列 0/2 相同、1/3 相同，行 0/2 相同、1/3 相同：
+    # 交织矩阵只有 2 种列向量和 2 种行向量，本质是平纹
+    threading = [0, 1, 2, 3, 0, 1, 2, 3]
+    tie_up = [
+        [1, 0, 1, 0],
+        [0, 1, 0, 1],
+        [1, 0, 1, 0],
+        [0, 1, 0, 1],
+    ]
+    treadling = [0, 1, 2, 3, 0, 1, 2, 3]
+    red = reduce_to_loom(threading, tie_up, treadling, 2)
+    check(red.min_shafts == 2 and red.min_treadles == 2,
+          "redundant draft: 2 distinct column/row vectors => 2x2 loom")
+    check(red.threading == [0, 1, 0, 1, 0, 1, 0, 1],
+          "redundant draft: columns merged by full column vector, first-seen order")
+    check(red.treadling == [0, 1, 0, 1, 0, 1, 0, 1],
+          "redundant draft: rows merged by full row vector, first-seen order")
+    check(red.tie_up == [[1, 0], [0, 1]],
+          "redundant draft: tie-up rebuilt as plain weave")
+    check(red.interlacing == build_interlacing(threading, tie_up, treadling),
+          "redundant draft: rebuilt matrix pointwise equals the original")
+
+
+def test_loom_fit_unused_shaft_but_distinct_columns():
+    # 3 综只用 2 个：原绑综列 0、1 互异，约简后仍需 2 综（仅去掉未使用综框）
+    threading = [0, 1, 0, 1, 0, 1]
+    tie_up = [[1, 0, 0], [0, 1, 0]]
+    treadling = [0, 1, 0, 1]
+    red = reduce_to_loom(threading, tie_up, treadling, 2)
+    check((red.original_shafts, red.original_treadles) == (3, 2),
+          "unused shaft: original is 3 shafts x 2 treadles")
+    check((red.min_shafts, red.min_treadles) == (2, 2),
+          "unused shaft: minimum keeps the 2 used distinct columns")
+    check(red.threading == [0, 1, 0, 1, 0, 1]
+          and red.treadling == [0, 1, 0, 1]
+          and red.tie_up == [[1, 0], [0, 1]],
+          "unused shaft: draft rebuilt without the empty shaft")
+    check(red.interlacing == build_interlacing(threading, tie_up, treadling),
+          "unused shaft: rebuilt matrix matches")
+
+
+def test_loom_fit_constant_matrix_collapses_to_one_by_one():
+    # 绑综恒为 1：所有列、行向量各自相同 -> 1 综 1 踏
+    threading = [0, 1, 2]
+    tie_up = [[1, 1, 1], [1, 1, 1]]
+    treadling = [0, 1, 0, 1]
+    red = reduce_to_loom(threading, tie_up, treadling, 4)
+    check((red.min_shafts, red.min_treadles) == (1, 1),
+          "constant matrix collapses to 1 shaft x 1 treadle")
+    check(red.threading == [0, 0, 0] and red.treadling == [0, 0, 0, 0]
+          and red.tie_up == [[1]],
+          "constant matrix: reduced draft is all zeros with 1x1 tie-up")
+    check(red.interlacing == [[1] * 3 for _ in range(4)],
+          "constant matrix: rebuilt matrix all ones")
+
+
+def test_loom_fit_first_seen_numbering_and_single_cell():
+    # 列向量按经纱首次出现顺序、行向量按纬纱首次出现顺序编号
+    threading = [0, 0, 1, 1]
+    tie_up = [[1, 0], [0, 1], [1, 0]]
+    treadling = [2, 2, 0, 1, 1]
+    red = reduce_to_loom(threading, tie_up, treadling, 5)
+    matrix = build_interlacing(threading, tie_up, treadling)
+    # 列 0=[1,1,1,0,0]、列 2=[0,0,0,1,1]：首次出现顺序 0,1
+    # 行按出现顺序：行0=行1=行2=[1,1,0,0]（首个），行3=[0,0,1,1]
+    check(red.threading == [0, 0, 1, 1],
+          "first-seen: shaft labels follow column first appearance")
+    check(red.treadling == [0, 0, 0, 1, 1],
+          "first-seen: treadle labels follow row first appearance")
+    check(red.tie_up == [[1, 0], [0, 1]],
+          "first-seen: tie-up uses representative row/column values")
+    check(red.interlacing == matrix, "first-seen: rebuilt matrix matches")
+
+    # 1x1 矩阵：1 综 1 踏
+    tiny = reduce_to_loom([0], [[0]], [0], 1)
+    check((tiny.min_shafts, tiny.min_treadles) == (1, 1)
+          and tiny.tie_up == [[0]] and tiny.interlacing == [[0]],
+          "single-cell design: 1x1 reduced draft")
+
+
+def test_loom_fit_random_properties():
+    rng = random.Random(20260922)
+    for _ in range(200):
+        shafts = rng.randint(1, 5)
+        treadles = rng.randint(1, 5)
+        ends = rng.randint(1, 12)
+        picks = rng.randint(1, 12)
+        threading = [rng.randrange(shafts) for _ in range(ends)]
+        treadling = [rng.randrange(treadles) for _ in range(picks)]
+        tie_up = [[rng.randrange(2) for _ in range(shafts)]
+                  for _ in range(treadles)]
+        matrix = build_interlacing(threading, tie_up, treadling)
+        red = reduce_to_loom(threading, tie_up, treadling, 1)
+
+        # 最少数量 = 不同完整列/行向量数，且不超过原数量
+        distinct_cols = len({tuple(matrix[h][w] for h in range(picks))
+                             for w in range(ends)})
+        distinct_rows = len({tuple(row) for row in matrix})
+        check(red.min_shafts == distinct_cols,
+              "random: min_shafts equals number of distinct column vectors")
+        check(red.min_treadles == distinct_rows,
+              "random: min_treadles equals number of distinct row vectors")
+        check(red.min_shafts <= red.original_shafts
+              and red.min_treadles <= red.original_treadles,
+              "random: reduced counts never exceed original counts")
+
+        # 约简草案尺寸自洽
+        check(len(red.tie_up) == red.min_treadles
+              and all(len(r) == red.min_shafts for r in red.tie_up),
+              "random: reduced tie-up is min_treadles x min_shafts")
+        check(all(0 <= s < red.min_shafts for s in red.threading)
+              and all(0 <= t < red.min_treadles for t in red.treadling),
+              "random: reduced indexes in range")
+        # 每个约简综框/踏板都被实际使用
+        check(sorted(set(red.threading)) == list(range(red.min_shafts))
+              and sorted(set(red.treadling)) == list(range(red.min_treadles)),
+              "random: every reduced shaft/treadle is used")
+        # 逐点重建与原矩阵一致
+        check(red.interlacing == matrix,
+              "random: rebuilt matrix pointwise equals the original")
+    print("  ok: loom fit random property checks (200 cases)")
+
+
 def test_validation():
     ok_cases = []
     # 维度不一致：绑综矩阵不是矩形
@@ -787,5 +929,11 @@ if __name__ == "__main__":
     test_balance_hotspots_cyclic_wrap()
     test_balance_hotspots_random_against_brute_force()
     test_balance_hotspots_validation()
+    test_loom_fit_no_reduction_when_columns_distinct()
+    test_loom_fit_merges_redundant_shafts_and_treadles()
+    test_loom_fit_unused_shaft_but_distinct_columns()
+    test_loom_fit_constant_matrix_collapses_to_one_by_one()
+    test_loom_fit_first_seen_numbering_and_single_cell()
+    test_loom_fit_random_properties()
     test_validation()
     print("all tests passed")

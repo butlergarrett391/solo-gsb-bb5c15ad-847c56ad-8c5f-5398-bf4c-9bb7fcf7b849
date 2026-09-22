@@ -17,6 +17,8 @@ from .models import (
     DesignOut,
     DesignSummary,
     ErrorOut,
+    LoomFitIn,
+    LoomFitOut,
     RepeatPeriodOut,
     RepairPlanOut,
     ThresholdProfileOut,
@@ -324,4 +326,52 @@ def balance_hotspots(design_id: int, request: BalanceHotspotsIn) -> dict:
         "design_id": design_id,
         "cyclic": stored["cyclic"],
         **result.to_dict(),
+    }
+
+
+@app.post(
+    "/designs/{design_id}/loom-fit",
+    response_model=LoomFitOut,
+    responses={404: {"model": ErrorOut, "description": "设计不存在"}},
+    tags=["designs"],
+)
+def loom_fit(design_id: int, request: LoomFitIn) -> dict:
+    """织机适配：读取已入库设计并重新生成交织矩阵，按**完整列向量相同的经纱
+    归入同一约简综框、完整行向量相同的纬纱归入同一约简踏板**（等价类按首次
+    出现顺序从 0 编号）重建 threading / tie_up / treadling，并逐点校验重建
+    矩阵与原矩阵一致。返回不同列/行向量数——即织出同一矩阵所需的**最少
+    综框 / 踏板数**、约简草案及相对原设计的减少量；仅当两项最少数量均不超过
+    设备上限（max_shafts、max_treadles，1～64）时 `fits=true`。接口只读
+    计算，不改库；设计不存在返回 404。"""
+    stored = db.get_design(design_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail=f"design {design_id} not found")
+    reduction = weave.reduce_to_loom(
+        stored["threading"],
+        stored["tie_up"],
+        stored["treadling"],
+        stored["max_float"],
+    )
+    return {
+        "design_id": design_id,
+        "warp_ends": stored["warp_ends"],
+        "weft_picks": stored["weft_picks"],
+        "max_shafts": request.max_shafts,
+        "max_treadles": request.max_treadles,
+        "fits": (
+            reduction.min_shafts <= request.max_shafts
+            and reduction.min_treadles <= request.max_treadles
+        ),
+        "min_shafts": reduction.min_shafts,
+        "min_treadles": reduction.min_treadles,
+        "original_shafts": reduction.original_shafts,
+        "original_treadles": reduction.original_treadles,
+        "shafts_reduction": reduction.original_shafts - reduction.min_shafts,
+        "treadles_reduction": reduction.original_treadles - reduction.min_treadles,
+        "reduced_draft": {
+            "threading": reduction.threading,
+            "tie_up": reduction.tie_up,
+            "treadling": reduction.treadling,
+            "interlacing": reduction.interlacing,
+        },
     }

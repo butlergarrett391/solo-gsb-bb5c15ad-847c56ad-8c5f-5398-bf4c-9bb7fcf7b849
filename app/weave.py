@@ -165,6 +165,20 @@ class RepairPlanStep:
 
 
 @dataclass
+class LoomFitReduction:
+    """基于交织矩阵等价类约简出的最少综框/踏板穿综草案。"""
+
+    original_shafts: int            # 原设计综框数（tie_up 列数）
+    original_treadles: int          # 原设计踏板数（tie_up 行数）
+    min_shafts: int                 # 不同完整列向量数 = 织出同一矩阵所需最少综框数
+    min_treadles: int               # 不同完整行向量数 = 织出同一矩阵所需最少踏板数
+    threading: list[int]            # 约简穿综：长度 = 经纱数，取值为约简综框号
+    tie_up: list[list[int]]         # 约简绑综：min_treadles 行 × min_shafts 列
+    treadling: list[int]            # 约简踏综：长度 = 纬纱数，取值为约简踏板号
+    interlacing: list[list[int]]    # 由约简草案重建的交织矩阵（与原矩阵逐点一致）
+
+
+@dataclass
 class RepairPlan:
     changes: int                          # 翻转次数（方案长度）
     final_violations: int                 # 最终违规总数（必须严格少于原设计）
@@ -813,4 +827,84 @@ def scan_balance_hotspots(
         windows_scanned=scanned,
         hotspots=hotspots,
         worst_hotspot=worst,
+    )
+
+
+def reduce_to_loom(
+    threading: list[int],
+    tie_up: list[list[int]],
+    treadling: list[int],
+    max_float: int,
+) -> LoomFitReduction:
+    """基于交织矩阵把设计约简到织出同一矩阵所需的最少综框与踏板。
+
+    约简依据是交织矩阵本身（而非原综框/踏板编号）：
+    - 完整列向量相同的经纱（矩阵中上下浮沉完全一致）归入同一个**约简综框**；
+    - 完整行向量相同的纬纱归入同一个**约简踏板**；
+    - 等价类按各自方向上**首次出现**的顺序从 0 编号；
+    - 约简绑综 tie_up'[t'][s'] 取该踏板等价类任一代表行在该综框等价类
+      任一代表列上的交织值（同类行/列上该值必然一致）；
+    - 据此重建 threading、tie_up、treadling，并逐点校验重建矩阵与原矩阵一致，
+      不一致说明约简逻辑有误，直接抛内部错误。
+
+    不同完整列（行）向量的数量即为织出同一矩阵所需综框（踏板）数的下界：
+    穿同一综框（踩同一踏板）的经（纬）纱在矩阵中的列（行）必然逐点相同，
+    因此该约简同时达到下界、数量最少。不修改传入的设计数据。
+    """
+    validate_design(threading, tie_up, treadling, max_float)
+    matrix = build_interlacing(threading, tie_up, treadling)
+    picks = len(matrix)          # 纬纱数（行数）
+    ends = len(matrix[0])        # 经纱数（列数）
+
+    # 列向量（经纱）等价类：按经纱首次出现顺序编号
+    shaft_of_col: dict[tuple[int, ...], int] = {}
+    col_rep: list[int] = []
+    reduced_threading: list[int] = []
+    for w in range(ends):
+        col = tuple(matrix[h][w] for h in range(picks))
+        label = shaft_of_col.get(col)
+        if label is None:
+            label = len(shaft_of_col)
+            shaft_of_col[col] = label
+            col_rep.append(w)
+        reduced_threading.append(label)
+
+    # 行向量（纬纱）等价类：按纬纱首次出现顺序编号
+    treadle_of_row: dict[tuple[int, ...], int] = {}
+    row_rep: list[int] = []
+    reduced_treadling: list[int] = []
+    for h in range(picks):
+        row = tuple(matrix[h][w] for w in range(ends))
+        label = treadle_of_row.get(row)
+        if label is None:
+            label = len(treadle_of_row)
+            treadle_of_row[row] = label
+            row_rep.append(h)
+        reduced_treadling.append(label)
+
+    # 用每个踏板类代表行 × 每个综框类代表列的交织值重建绑综矩阵
+    reduced_tie_up = [
+        [matrix[h_rep][w_rep] for w_rep in col_rep]
+        for h_rep in row_rep
+    ]
+
+    rebuilt = build_interlacing(
+        reduced_threading, reduced_tie_up, reduced_treadling
+    )
+    if any(
+        rebuilt[h][w] != matrix[h][w]
+        for h in range(picks)
+        for w in range(ends)
+    ):
+        raise RuntimeError("loom reduction rebuilt an inconsistent interlacing matrix")
+
+    return LoomFitReduction(
+        original_shafts=len(tie_up[0]),
+        original_treadles=len(tie_up),
+        min_shafts=len(col_rep),
+        min_treadles=len(row_rep),
+        threading=reduced_threading,
+        tie_up=reduced_tie_up,
+        treadling=reduced_treadling,
+        interlacing=rebuilt,
     )

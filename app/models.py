@@ -251,6 +251,75 @@ class DesignCompareIn(BaseModel):
     )
 
 
+class LoomFitIn(BaseModel):
+    """织机适配（最少综框/踏板约简）请求。"""
+
+    max_shafts: int = Field(
+        ..., ge=1, le=64, description="设备可用综框数上限，1～64"
+    )
+    max_treadles: int = Field(
+        ..., ge=1, le=64, description="设备可用踏板数上限，1～64"
+    )
+
+
+class ReducedDraftOut(BaseModel):
+    """基于交织矩阵等价类约简出的最少综框/踏板穿综草案。"""
+
+    threading: list[int] = Field(
+        ...,
+        description="约简穿综：threading[w] 为第 w 根经纱归入的约简综框号"
+        "（等价类按列向量首次出现顺序从 0 编号）",
+    )
+    tie_up: list[list[int]] = Field(
+        ...,
+        description="约简绑综矩阵：min_treadles 行 × min_shafts 列，"
+        "1=踏板提升该约简综框，0=不提升",
+    )
+    treadling: list[int] = Field(
+        ...,
+        description="约简踏综：treadling[h] 为第 h 纬归入的约简踏板号"
+        "（等价类按行向量首次出现顺序从 0 编号）",
+    )
+    interlacing: list[list[int]] = Field(
+        ...,
+        description="由约简草案逐点重建的交织矩阵（与原设计交织矩阵完全一致）",
+    )
+
+
+class LoomFitOut(BaseModel):
+    """织机适配结果：交织矩阵驱动的最少综框/踏板约简。"""
+
+    design_id: int = Field(..., description="被分析的设计 ID")
+    warp_ends: int = Field(..., description="经纱数（约简前后不变）")
+    weft_picks: int = Field(..., description="纬纱数（约简前后不变）")
+    max_shafts: int = Field(..., description="本次设备综框数上限（1～64）")
+    max_treadles: int = Field(..., description="本次设备踏板数上限（1～64）")
+    fits: bool = Field(
+        ...,
+        description="是否适配：仅当 min_shafts、min_treadles 均不超过对应上限时为 true",
+    )
+    min_shafts: int = Field(
+        ...,
+        description="织出同一交织矩阵所需的最少综框数（不同完整列向量数）",
+    )
+    min_treadles: int = Field(
+        ...,
+        description="织出同一交织矩阵所需的最少踏板数（不同完整行向量数）",
+    )
+    original_shafts: int = Field(..., description="原设计综框数（tie_up 列数）")
+    original_treadles: int = Field(..., description="原设计踏板数（tie_up 行数）")
+    shafts_reduction: int = Field(
+        ..., description="相对原设计减少的综框数：original_shafts - min_shafts"
+    )
+    treadles_reduction: int = Field(
+        ..., description="相对原设计减少的踏板数：original_treadles - min_treadles"
+    )
+    reduced_draft: ReducedDraftOut = Field(
+        ..., description="约简穿综草案（threading / tie_up / treadling 及重建矩阵）"
+    )
+
+
+
 class MismatchPointOut(BaseModel):
     """最佳对齐下一个不一致单元的坐标与双方取值。"""
 
